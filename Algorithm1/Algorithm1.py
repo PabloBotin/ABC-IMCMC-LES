@@ -80,50 +80,72 @@ C_matrix = sample_uniform_grid(N, C_limits) # Array of N sampled parameter sets
 # print (len(C_matrix))
 
 #### Step 5. Calculate D' from F(ci) LES model  ####
+# A. In order to test the algorithm, I will use a RANS system of ODE's for homogeneous turbulence. 
+# Because LES takes around 2 min to run each simulation meanwhile the RANS ODE takes less than 1 sec. 
+# So.. which ODE should I use? Colin asked Olga to provide hers. 
+# Also, which is the output of RANS? Similar statistics? 
+
+# B. spectralLES
 # Colin provided a new spectralLES code which is way simpler. The problem is that the output statistic is only 
 # the energy spectrum. I asked for sigmas and P so let's see if he computes them, otherwise I ll compute em myself.
 # The implementation of the LES run will be set taking the code 'run.py' as a reference, modifying the method 
 # In order to adjust the parameters for each run. 
-def main_abc_program(C0, C1, C2, C3):
+def main_abc_program():
 
     # Start by running a Dynamic Smagorinsky case with random initial condition
     # in order to get the "baseline" LES comparison and a better solution
     # field from which to restart all of the ABC runs.
-    # I have established tlimit as 0.8s, concluding from the comparation of results that 
-    # steady state is reached from that moment.
-    # What about dt_stat? How should we set it? Do we want several stats or just at the end?
-    # I believe that just at the end is enough, so  
-
     config = Config(pid='dyn_smag', model='dyn_smag', test_filter='gaussian',
-                    tlimit=0.8, dt_stat=0.4)    
+                    tlimit=4.0, dt_stat=1.0, dt_init=1)
 
     sim = SpectralLES(config)  # get new LES instance
-    sim.run_verbose()  # ignore the results
+    sim.run_quiet()  # ignore the results
 
     # Run a GEV test case for debugging.
     # NOTE to Pablo: Replace this part with your ABC algorithm.
-    config = Config(pid='abc_run1', model='gev',
-                    C0=C0, C1=C1, C2=C2, C3=C3,
+    config = Config(pid='abc_run1', model='4term',
+                    C0=-0.069, C1=0.07, C2=0.0056, C3=0,
                     init_cond='file', init_file='dyn_smag.checkpoint.h5',
-                    tlimit=0.8, dt_stat=0.4)
+                    tlimit=4.0, dt_stat=1.0)
     sim = SpectralLES(config)  # get new LES instance
     results = sim.run_verbose()
 
     # Process the results into an ABC distance metric
     fh = h5py.File(results)
-    Ek = np.zeros(sim.num_wavemodes)
-    for grp in fh:
-        Ek += grp['Ek']
 
+    Ek = np.zeros(sim.num_wavemodes)
+    Pi = np.zeros(fh['000/Pi/hist'].shape)
+
+    for step in fh:  # this loops over group keys not the groups themselves!
+        Ek += fh[f'{step}/Ek']
+        Pi += fh[f'{step}/Pi/hist']
+
+        # you can also access...
+        # fh[f'{step}/Pi/edges'] -> histogram bin edges
+        # fh[f'{step}/Pi/moments'] -> 1st 4 raw moments
+        # fh[f'{step}/Pi/range'] -> 1st and last bin edge
+        # fh[f'{step}/Pi/log'] -> whether the histogram was computed using the
+        #                         log10 of the data because data was strictly
+        #                         positive. (If so, edges will be for log10 of
+        #                         data, but range and moments are always for
+        #                         the raw data).
+
+        # I can also just remove the log(data) functionality.
+
+    # ...
+
+    return Summary statistics (sigma & Production rate)
+    
 # Run the LES model with all the sampled parameter sets. 
 for i in range (len(C_matrix)):
     main_abc_program(C_matrix[i][0], C_matrix[i][1], C_matrix[i][2], C_matrix[i][3])
 
 # Once I have implemented the summary statistic computation inside of the LES run.. I have to compute the distance.  
 
+
 #### Step 6. Calculate model summary statistic S' from D' ####
-# This would be included in Step 5 if Colin does it. 
-# Even if he does not, I would need to include it by myself when builidng the LES run
+# This would be included in Step 5 if Colin does it. He is working on that. 
+# Even if he does not, I would need to include it by myself when building the LES run.
 # But, let's go back to the origins... Which summary statistic should I use? 
 ### A. Energy Spectrum 
 ### B. pdf of Sigma 
@@ -133,7 +155,8 @@ for i in range (len(C_matrix)):
 # Let's see how is the output provided by Colin. 
 # From that, I'll have to figure out how to compute spectra, log pdf of sigma and log pdf of P. 
 # This can be based on ABC_static_test.py and my postprocessing code.
-
+# Elaborar c'odigo que lo calcule desde los h5py files. 
+# Para ello, runnear un static test del nuevo spectralLES 
 
 #### Step 7. Calculate statistical distance d(S',S) ####
 # A. Summatory of the normalized difference of each wavenumber (only those corresponding to the LES resolved scales).
