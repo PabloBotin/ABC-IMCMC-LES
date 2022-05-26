@@ -12,18 +12,18 @@ def main_abc_program():
     # in order to get the "baseline" LES comparison and a better solution
     # field from which to restart all of the ABC runs.
     config = Config(pid='dyn_smag', model='dyn_smag', test_filter='gaussian',
-                    tlimit=4.0, dt_stat=1.0)
+                    tlimit=4.0, cycle_limit=5)
 
     sim = SpectralLES(config)  # get new LES instance
     sim.run_quiet()  # ignore the results
 
-    Run a GEV test case for debugging.
-    NOTE to Pablo: Replace this part with your ABC algorithm.
+    # Run a GEV test case for debugging.
+    # NOTE to Pablo: Replace this part with your ABC algorithm.
     config = Config(pid='abc_run1', model='4term',
-                    # C0=-0.032, C1=-0.014, C2=-0.2, C3=-0.2,
-                    C0=0.01, C1=0.01, C2=0.01, C3=0.01,
+                    C0=-0.032, C1=-0.014, C2=-0.2, C3=-0.2,
+                    # C0=0.01, C1=0.01, C2=0.01, C3=0.01,
                     init_cond='file', init_file='dyn_smag.checkpoint.h5',
-                    tlimit=4.0, dt_stat=1.0)
+                    tlimit=4.0, cycle_limit=5)
 
     sim = SpectralLES(config)  # get new LES instance
     results = sim.run_verbose()
@@ -51,7 +51,8 @@ def main_abc_program():
         # I can also just remove the log(data) functionality.
 
     # ...
-
+    print (Ek)
+    print (Pi)
     return
 
 

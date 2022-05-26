@@ -26,8 +26,7 @@ class Config:
 
     """
     # Notional simulation grid size (3/2 dealising pads this by 1.5)
-    # N: int = 32 Original 
-    N: int = 64
+    N: int = 32
 
     # Physical kinematic viscosity
     nu: float = 0.000185
@@ -55,6 +54,9 @@ class Config:
 
     # Simulation time limit
     tlimit: float = 20.0
+
+    # Simulation limit on number of time steps taken
+    cycle_limit: int = 5000
 
     # Time between pdf and spectrum outputs
     dt_stat: float = np.inf
@@ -107,12 +109,21 @@ class MPI_Debugging:
     `MPI.Comm` instance stored as the attribute `self.comm`.
 
     """
-    def print(self, string, flush=False):
-        """Have rank 0 write `string` to `stdout`.
+    def disable_print(self):
+        sys.stdout = open(os.devnull, 'w')
+
+    def enable_print(self):
+        sys.stdout = sys.__stdout__
+
+    def redirect_print(self, filename):
+        sys.stdout = open(filename, 'w')
+
+    def print(self, string, flush=False, **kwargs):
+        """Have rank 0 only call print()
 
         """
         if self.comm.rank == 0:
-            print(string, flush=flush)
+            print(string, flush=flush, **kwargs)
 
     def soft_abort(self, string, code=1):
         """All tasks exit program with exit code `code` after rank 0 prints
@@ -145,18 +156,6 @@ class MPI_Debugging:
         if test is False:
             self.soft_abort(string)
 
-    def hard_assert(self, test, string=""):
-        """If ``test is False`` then call `MPI.Comm.Abort` and hard crash.
-
-        .. note:: Use this in place of Python's builtin `assert` for tests
-        that may vary between processors and for which there is no way to
-        perform an `all_assert`. The builtin `assert` will only kill its own
-        process, leading to the MPI program hanging indefinitely.
-        """
-        if test is False:
-            print(string, flush=True)
-            self.comm.Abort()
-
 
 class SpectralLES(MPI_Debugging):
     """
@@ -168,6 +167,7 @@ class SpectralLES(MPI_Debugging):
         # -------------------------------------------------------------------
         # Configure the FFTs and allocate solution arrays
         # -------------------------------------------------------------------
+        self.disable_print()  # disable screen outputs by default
         self.comm = comm
         self.config = config
         self.nu = config.nu
@@ -264,7 +264,7 @@ class SpectralLES(MPI_Debugging):
 
         elif config.model == '4term':
             self.Cs = np.array((config.C0, config.C1, config.C2, config.C3))
-            self.Cs *= self.Delta2
+            self.Cs *= -1 * self.Delta2
 
             self.Smat = np.empty([6, *self.r.shape], self.r.dtype)
             self.Rmat = np.empty([6, *self.r.shape], self.r.dtype)
@@ -530,6 +530,7 @@ class SpectralLES(MPI_Debugging):
         # --------------------------------------------------------------
         # Setup
         # --------------------------------------------------------------
+        self.enable_print()
         self.comm.Barrier()
         start = time.strftime('%H:%M:%S')
 
@@ -589,35 +590,46 @@ class SpectralLES(MPI_Debugging):
         # --------------------------------------------------------------
         # Time integration loop
         # --------------------------------------------------------------
-        while t_sim < tlimit:
-            if tlimit - t_sim < dt:
-                dt = tlimit - t_sim
+        try:
+            while t_sim < tlimit:
+                if tlimit - t_sim < dt:
+                    dt = tlimit - t_sim
 
-            u_hat0[:] = u_hat1[:] = self.u_hat
+                u_hat0[:] = u_hat1[:] = self.u_hat
 
-            # Stages 1 to 3
-            for rk in range(3):
+                # Stages 1 to 3
+                for rk in range(3):
+                    self.compute_rhs(du)
+                    u_hat1 += b[rk] * dt * du
+                    self.u_hat[:] = u_hat0 + a[rk] * dt * du
+                    self.vfft.backward(self.u_hat, self.u)
+
+                # Stage 4
                 self.compute_rhs(du)
-                u_hat1 += b[rk] * dt * du
-                self.u_hat[:] = u_hat0 + a[rk] * dt * du
+                u_hat1 += b[3] * dt * du
+                self.u_hat[:] = u_hat1[:]
                 self.vfft.backward(self.u_hat, self.u)
 
-            # Stage 4
-            self.compute_rhs(du)
-            u_hat1 += b[3] * dt * du
-            self.u_hat[:] = u_hat1[:]
-            self.vfft.backward(self.u_hat, self.u)
+                # Update t_sim
+                t_sim += dt
 
-            # Update t_sim
-            t_sim += dt
+                # Update dt, output statistics, etc.
+                dt = self.step_update(du, t_sim, dt)
 
-            # Update dt, output statistics, etc.
-            dt = self.step_update(du, t_sim, dt)
+        except SystemExit:
+            self.print(f"SpectralLES Warning: Simulation {config.pid=} "
+                       "aborted before reaching tlimit!",
+                       file=sys.__stdout__, flush=True)
+
+        except Exception as err:
+            self.print(f"SpectralLES Warning: Unexpected {err=}\n"
+                       f"{config.pid=} interrupted before reaching tlimit!",
+                       file=sys.__stdout__, flush=True)
 
         # --------------------------------------------------------------
         # Finish
         # --------------------------------------------------------------
-        self.finalize()
+        self.finalize(t_sim)
 
         return self.stat_file
 
@@ -806,15 +818,18 @@ class SpectralLES(MPI_Debugging):
 
         new_dt = min(2.0 * dt, self._dt_hydro, self._dt_diff)
 
-        if new_dt < 1.0e-8:
-            self.finalize(t_sim)
-            self.soft_abort("Error: tiny time step!")
-
         # --------------------------------------------------------------
         # Generate Outputs
         # --------------------------------------------------------------
         self.istep += 1
         t_next = t_sim + new_dt
+
+        if sys.stdout.name != '/dev/null':
+            self.w[0] = dot(self.u, self.u)
+            TKE = 0.5 * self.allsum(self.w[0]) / self.nx.prod()
+            self.print(f"cycle = {self.istep:4d}, time = {t_sim:< 14.6e}, "
+                       f"dt = {dt:< 14.6e}, TKE = {TKE:< 14.6e}",
+                       flush=(self.istep % 25 == 0))
 
         if t_sim + 1e-8 >= self.t_stat:
             self.t_stat += max(config.dt_stat, t_next - self.t_stat)
@@ -829,14 +844,12 @@ class SpectralLES(MPI_Debugging):
             rst_output = True
 
         if rst_output or (self.istep % 200 == 0):
-            self.w[0] = dot(self.u, self.u)
-            TKE = 0.5 * self.allsum(self.w[0]) / self.nx.prod()
-            self.print(f"cycle = {self.istep:4d}, time = {t_sim:< 14.6e}, "
-                       f"dt = {dt:< 14.6e}, TKE = {TKE:< 14.6e}",
-                       flush=(self.istep % 25 == 0))
-
             if self.comm.rank == 0:
                 self.fh_stat.flush()
+
+        if self.istep > config.cycle_limit:
+            self.finalize(t_sim)
+            self.soft_abort("Error: hit cycle limit!")
 
         return new_dt
 
@@ -1008,6 +1021,8 @@ class SpectralLES(MPI_Debugging):
                 # Pi = tau_ij * Sij
                 Pi += (1 + (i != j)) * tau_ij * Smat[m]
 
+                # IT IS POSSIBLE TO ADD CALLS TO `save_histogram_to_file` HERE!
+
                 m += 1
 
         # Compute nuT = Pi / Ssq (same memory space as Pi)
@@ -1054,9 +1069,16 @@ class SpectralLES(MPI_Debugging):
         for i in range(3):
             Sii = self.fft.backward(iK[i] * u_hat[i])
             self.w[i] = Sii
+
+        # Save (S_11, S_22, S_33) combined PDF and moments. This can be used
+        # later to compute the velocity gradient skewness and the
+        # longitudinal Taylor scale.
         self.save_histogram_to_file(grp, self.w, 'S_diag')
 
+        # even if you don't output Ssq histogram, still need this for Pi!!
         work[:] = self.strain_squared(u_hat, out=work) + 1e-99
+
+        # SijSij statistics are interesting for model diagnostic purposes
         self.save_histogram_to_file(grp, work, 'Ssq')
 
         work *= self.nuT  # convert Ssq to Pi
@@ -1067,6 +1089,7 @@ class SpectralLES(MPI_Debugging):
         self.save_histogram_to_file(grp, self.nuT, 'nuT')
 
         # turbulent stress tensor statistics
+        # (NOTE: all statistics are isotropic, so sigma terms are grouped!)
         if self.config.model in ['smag', 'dyn_smag']:
             self.w_hat[:] = 0.0
             k = 0
@@ -1079,6 +1102,7 @@ class SpectralLES(MPI_Debugging):
                     self.w_hat[j] += iK[i] * tau_ij
                     k += 1
 
+            # save a histogram for combined (sigma_12, sigma_13, sigma_23)
             self.save_histogram_to_file(grp, self.w, 'sigma_triu')
 
             for i in range(3):
@@ -1087,12 +1111,17 @@ class SpectralLES(MPI_Debugging):
                 tau_ii = self.fft.forward(self.w[i])
                 self.w_hat[i] += iK[i] * tau_ii
 
+            # save a histogram for combined (sigma_11, sigma_22, sigma_33)
             self.save_histogram_to_file(grp, self.w, 'sigma_diag')
 
+            # save a histogram for all 3 terms of div(sigma)
             self.vfft.backward(self.w_hat, self.w)
             self.save_histogram_to_file(grp, self.w, 'div_sigma')
 
         else:  # 4term model
+            # need to write a separate function or add computing PDFs to the
+            # `update_4term_viscosity` method. It is possible to separate
+            # the actions of computing a PDF and writing it to the HDF5 file.
             pass
 
         self.istat += 1
