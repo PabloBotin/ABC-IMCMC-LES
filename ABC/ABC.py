@@ -29,6 +29,17 @@ C3=-0.2
 # the minimum number of cycles which allows running it for 0.8s. Does this make sense? 
 # From run.py...
 def main_abc_program():
+
+	# Start by running a Dynamic Smagorinsky case with random initial condition
+    # in order to get the "baseline" LES comparison and a better solution
+    # field from which to restart all of the ABC runs.
+	config = Config(pid='dyn_smag', model='dyn_smag', test_filter='gaussian',
+                    tlimit=4.0, cycle_limit=5)
+
+    sim = SpectralLES(config)  # get new LES instance
+    sim.run_quiet()  # ignore the results
+
+    # Now, the real run:
     config = Config(pid='abc_run1', model='4term',
                     C0=-0.032, C1=-0.014, C2=-0.2, C3=-0.2,
                     # C0=0.01, C1=0.01, C2=0.01, C3=0.01,
@@ -146,4 +157,7 @@ def distance (S_LES, S_DNS):
 
 
 
-
+# How to update GitHub:
+#   git add <file> (or .)
+#   git commit -m 'message'
+#   git push origin 

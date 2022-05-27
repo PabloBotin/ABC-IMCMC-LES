@@ -11,23 +11,18 @@ def main_abc_program():
     # Start by running a Dynamic Smagorinsky case with random initial condition
     # in order to get the "baseline" LES comparison and a better solution
     # field from which to restart all of the ABC runs.
+    config = Config(pid='dyn_smag', model='dyn_smag', test_filter='gaussian',
+                    tlimit=4.0, dt_stat=1.0)
 
-# Since the initialization file has already been created, I skip this. 
-
-    # config = Config(pid='dyn_smag', model='dyn_smag', test_filter='gaussian',
-    #                 tlimit=0.5, dt_stat=1.0, cycle_limit=200)
-
-    # sim = SpectralLES(config)  # get new LES instance
-    # sim.run_quiet()  # ignore the results
-
-
+    sim = SpectralLES(config)  # get new LES instance
+    sim.run_quiet()  # ignore the results
 
     # Run a GEV test case for debugging.
     # NOTE to Pablo: Replace this part with your ABC algorithm.
-    config = Config(pid='abc_run2', model='4term',
-                    C0=-0.032, C1=-0.014, C2=-0.2, C3=-0.2,
+    config = Config(pid='abc_run1', model='4term',
+                    C0=0.01, C1=0.01, C2=0.01, C3=0.01,
                     init_cond='file', init_file='dyn_smag.checkpoint.h5',
-                    tlimit=0.5, dt_stat=1.0, cycle_limit=500)
+                    tlimit=4.0, dt_stat=1.0)
     sim = SpectralLES(config)  # get new LES instance
     results = sim.run_verbose()
 
