@@ -1,4 +1,4 @@
-# This file will try to compute the distance between the summary statistkics of 2 different LES runs.
+# This file will try to compute the distance between the S (Pi and Sigmas) of 2 different LES runs.
 import numpy as np
 import h5py
 import matplotlib.pyplot as plt
@@ -50,16 +50,16 @@ filename1 = 'abc_run1.statistics.h5'
 filename2 = 'abc_run2.statistics.h5'
 LES1=LES_simulation (filename1, 'b')
 LES2=LES_simulation (filename2, 'r')
-plt.show()
+
 Pi1=LES1.logpdf()
 Pi2=LES1.logpdf()
-
+plt.show()
 # 4. Compute distance.
 
-def distance (S_LES, S_DNS):
-	d= np.sqrt(np.absolute(np.log(S_DNS)-np.log(S_LES))**2)
+# def distance (S_LES, S_DNS):
+# 	d= np.sqrt(np.absolute(np.log(S_DNS)-np.log(S_LES))**2)
 
-d=distance (Pi1, Pi2)
-print(d)
+# d=distance (Pi1, Pi2)
+# print(d)
 
 
