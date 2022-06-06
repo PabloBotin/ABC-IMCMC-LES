@@ -76,7 +76,7 @@ class Config:
     # Initial TKE if init_cond == 'random'
     KE_init: float = 1.4
 
-    # Initial E(k) slope if init_cond == 'file'
+    # Initial E(k) slope if init_cond == 'random'
     kExp_init: float = 1/3
 
     # Advection CFL number
@@ -92,10 +92,10 @@ class Config:
     Cs: float = 0.01
 
     # Generalized Eddy Viscosity constants
-    C0: float = 0.01
-    C1: float = 0.0
+    C1: float = -0.03
     C2: float = 0.0
     C3: float = 0.0
+    C4: float = 0.0
 
     # Test filter shape if model == 'dyn_smag'
     test_filter: str = 'gaussian'
@@ -167,7 +167,6 @@ class SpectralLES(MPI_Debugging):
         # -------------------------------------------------------------------
         # Configure the FFTs and allocate solution arrays
         # -------------------------------------------------------------------
-        self.disable_print()  # disable screen outputs by default
         self.comm = comm
         self.config = config
         self.nu = config.nu
@@ -263,8 +262,18 @@ class SpectralLES(MPI_Debugging):
             self.rhs_turbulence_model = self.rhs_smagorinsky
 
         elif config.model == '4term':
-            self.Cs = np.array((config.C0, config.C1, config.C2, config.C3))
+            self.Cs = np.array((config.C1, config.C2, config.C3, config.C4))
             self.Cs *= -1 * self.Delta2
+
+            self._mk = np.array([[0, 1, 2],
+                                [1, 3, 4],
+                                [2, 4, 5]])
+            self._Tik = np.array([[+1, +1, +1],
+                                 [-1, +1, +1],
+                                 [-1, -1, +1]])
+            self._Tkj = np.array([[+1, -1, -1],
+                                 [+1, +1, -1],
+                                 [+1, +1, +1]])
 
             self.Smat = np.empty([6, *self.r.shape], self.r.dtype)
             self.Rmat = np.empty([6, *self.r.shape], self.r.dtype)
@@ -302,7 +311,7 @@ class SpectralLES(MPI_Debugging):
         if config.init_cond == 'random':
             energy = config.KE_init
             exponent = config.kExp_init
-            rseed = self.comm.rank  # for dev testing only
+            rseed = None  # this let's numpy be random from run to run
             self.initialize_random_spectrum(energy, exponent, rseed)
 
         elif config.init_cond == 'file':
@@ -355,6 +364,17 @@ class SpectralLES(MPI_Debugging):
 
         self.t_rst += config.dt_rst
         self.t_stat += config.dt_stat
+
+        self.disable_print()  # disable screen outputs by default
+
+        return
+
+    def __del__(self):
+        if self.comm.rank == 0:
+            self.fh_stat.flush()
+            self.fh_stat.close()
+
+        self.enable_print()
 
         return
 
@@ -531,9 +551,8 @@ class SpectralLES(MPI_Debugging):
         # Setup
         # --------------------------------------------------------------
         self.enable_print()
-        self.comm.Barrier()
-        start = time.strftime('%H:%M:%S')
 
+        start = time.strftime('%H:%M:%S')
         self.print(
             "\n------------------------------------------------------\n"
             "MPI-parallel Python LES simulation of HIT \n"
@@ -547,7 +566,7 @@ class SpectralLES(MPI_Debugging):
         self.comm.Barrier()
         wt1 = time.perf_counter()
 
-        self.run_quiet()
+        success = self.run_quiet()
 
         self.comm.Barrier()
         wt2 = time.perf_counter()
@@ -568,7 +587,7 @@ class SpectralLES(MPI_Debugging):
             f"Simulation finished at {time.strftime('%H:%M:%S')}.\n"
             "----------------------------------------------------------\n")
 
-        return self.stat_file
+        return success
 
     def run_quiet(self):
         # --------------------------------------------------------------
@@ -617,21 +636,28 @@ class SpectralLES(MPI_Debugging):
                 dt = self.step_update(du, t_sim, dt)
 
         except SystemExit:
+            self.enable_print()
             self.print(f"SpectralLES Warning: Simulation {config.pid=} "
                        "aborted before reaching tlimit!",
-                       file=sys.__stdout__, flush=True)
+                       flush=True)
+            success = False
 
         except Exception as err:
+            self.enable_print()
             self.print(f"SpectralLES Warning: Unexpected {err=}\n"
                        f"{config.pid=} interrupted before reaching tlimit!",
-                       file=sys.__stdout__, flush=True)
+                       flush=True)
+            success = False
+
+        else:
+            success = True
 
         # --------------------------------------------------------------
-        # Finish
+        # Finish (executes in all cases, even unknown Exception)
         # --------------------------------------------------------------
         self.finalize(t_sim)
 
-        return self.stat_file
+        return success
 
     def compute_rhs(self, du):
         """Incompressible Navier-Stokes advection in rotation form with
@@ -709,15 +735,6 @@ class SpectralLES(MPI_Debugging):
         Ssq = self.w[0]
         Rsq = self.w[1]
         tau_ij = self.w[2]
-        mk = np.array([[0, 1, 2],
-                       [1, 3, 4],
-                       [2, 4, 5]])
-        Tik = np.array([[+1, +1, +1],
-                        [-1, +1, +1],
-                        [-1, -1, +1]])
-        Tkj = np.array([[+1, -1, -1],
-                        [+1, +1, -1],
-                        [+1, +1, +1]])
 
         Ssq[:] = 0.0
         Rsq[:] = 0.0
@@ -739,10 +756,10 @@ class SpectralLES(MPI_Debugging):
         m = 0
         for i in range(3):
             for j in range(i, 3):
-                ik = mk[i]
-                kj = mk[j]
-                tik = Tik[i].reshape(3, 1, 1, 1)
-                tkj = Tkj[j].reshape(3, 1, 1, 1)
+                ik = self._mk[i]
+                kj = self._mk[j]
+                tik = self._Tik[i].reshape(3, 1, 1, 1)
+                tkj = self._Tkj[j].reshape(3, 1, 1, 1)
 
                 # G_ij^(1) = |S| S_ij, note inclusion of 2 here
                 tau_ij[:] = C[0] * np.sqrt(2*Ssq) * Smat[m]
@@ -831,14 +848,13 @@ class SpectralLES(MPI_Debugging):
                        f"dt = {dt:< 14.6e}, TKE = {TKE:< 14.6e}",
                        flush=(self.istep % 25 == 0))
 
-        if t_sim + 1e-8 >= self.t_stat:
+        if t_sim + 1e-14 >= self.t_stat:
             self.t_stat += max(config.dt_stat, t_next - self.t_stat)
             self.save_statistics_to_file(t_sim)
 
         rst_output = False
-        if t_sim + 1e-8 >= self.t_rst:
-            config.t_init = t_sim
-            config.dt_init = new_dt
+        if t_sim + 1e-14 >= self.t_rst:
+            config.dt_init = new_dt  # this modifies the Config object in place
             self.t_rst += max(config.dt_rst, t_next - self.t_rst)
             self.write_restart_to_file()
             rst_output = True
@@ -1021,8 +1037,6 @@ class SpectralLES(MPI_Debugging):
                 # Pi = tau_ij * Sij
                 Pi += (1 + (i != j)) * tau_ij * Smat[m]
 
-                # IT IS POSSIBLE TO ADD CALLS TO `save_histogram_to_file` HERE!
-
                 m += 1
 
         # Compute nuT = Pi / Ssq (same memory space as Pi)
@@ -1033,16 +1047,11 @@ class SpectralLES(MPI_Debugging):
     ###########################################################################
     # Output Methods
     ###########################################################################
-    def finalize(self, t_sim=None):
-        config = self.config
-        config.t_init = t_sim or config.tlimit
-
-        # output statistics without updating self.t_stat
-        self.save_statistics_to_file(config.t_init)
-
-        # output checkpoint without updating self.t_rst
+    def finalize(self, t_sim):
+        self.save_statistics_to_file(t_sim)
         self.write_restart_to_file(checkpoint=True)
 
+        self.enable_print()
         if self.comm.rank == 0:
             self.fh_stat.flush()
             print(' *** satistics flushed to disk '
@@ -1066,63 +1075,58 @@ class SpectralLES(MPI_Debugging):
         if self.comm.rank == 0:
             grp['Ek'] = Ek1d
 
-        for i in range(3):
-            Sii = self.fft.backward(iK[i] * u_hat[i])
-            self.w[i] = Sii
-
-        # Save (S_11, S_22, S_33) combined PDF and moments. This can be used
-        # later to compute the velocity gradient skewness and the
-        # longitudinal Taylor scale.
-        self.save_histogram_to_file(grp, self.w, 'S_diag')
-
-        # even if you don't output Ssq histogram, still need this for Pi!!
         work[:] = self.strain_squared(u_hat, out=work) + 1e-99
-
-        # SijSij statistics are interesting for model diagnostic purposes
-        self.save_histogram_to_file(grp, work, 'Ssq')
-
         work *= self.nuT  # convert Ssq to Pi
         if self.config.model == '4term':
             # because Ssq = 2SijSij here, but not in 4term model!
             work *= 0.5
         self.save_histogram_to_file(grp, work, 'Pi')
-        self.save_histogram_to_file(grp, self.nuT, 'nuT')
 
         # turbulent stress tensor statistics
-        # (NOTE: all statistics are isotropic, so sigma terms are grouped!)
         if self.config.model in ['smag', 'dyn_smag']:
             self.w_hat[:] = 0.0
-            k = 0
-            for i in range(2):
-                for j in range(i+1, 3):
-                    Sij = self.fft.backward(iK[j]*u_hat[i] + iK[i]*u_hat[j])
-                    self.w[k] = self.nuT * Sij
-                    tau_ij = self.fft.forward(self.w[k])
-                    self.w_hat[i] += iK[j] * tau_ij
-                    self.w_hat[j] += iK[i] * tau_ij
-                    k += 1
-
-            # save a histogram for combined (sigma_12, sigma_13, sigma_23)
-            self.save_histogram_to_file(grp, self.w, 'sigma_triu')
-
-            for i in range(3):
-                Sii = self.fft.backward(iK[i] * u_hat[i])
-                self.w[i] = self.nuT * Sii
-                tau_ii = self.fft.forward(self.w[i])
-                self.w_hat[i] += iK[i] * tau_ii
-
-            # save a histogram for combined (sigma_11, sigma_22, sigma_33)
-            self.save_histogram_to_file(grp, self.w, 'sigma_diag')
-
-            # save a histogram for all 3 terms of div(sigma)
-            self.vfft.backward(self.w_hat, self.w)
-            self.save_histogram_to_file(grp, self.w, 'div_sigma')
+            for j in range(3):
+                Sij = self.fft.backward(iK[j]*u_hat[0] + iK[0]*u_hat[j])
+                self.w[0] = self.nuT * Sij
+                self.save_histogram_to_file(grp, self.w[0], f'sigma_1{j+1}')
 
         else:  # 4term model
-            # need to write a separate function or add computing PDFs to the
-            # `update_4term_viscosity` method. It is possible to separate
-            # the actions of computing a PDF and writing it to the HDF5 file.
-            pass
+            # When this function is called from `step_update` or `finalize`,
+            # the following things are true:
+            # - Smat and Rmat will already be computed and correct
+            # - Ssq and Rsq (aka w[0] and w[1]) will have been overwritten
+            C = self.Cs
+            Smat = self.Smat
+            Rmat = self.Rmat
+            Ssq = self.w[0]
+            Rsq = self.w[1]
+            tau_ij = self.w[2]
+
+            Ssq[:] = 0.0
+            Rsq[:] = 0.0
+            m = 0
+            for i in range(3):
+                for j in range(i, 3):
+                    Ssq += (1 + (i != j)) * Smat[m]**2
+                    Rsq += (1 + (i != j)) * Rmat[m]**2
+                    m += 1
+
+            i = 0  # i = 0 corresponds to tau_11, tau_12, tau_13
+            for j in range(3):
+                ik = self._mk[i]
+                kj = self._mk[j]
+                tik = self._Tik[i].reshape(3, 1, 1, 1)
+                tkj = self._Tkj[j].reshape(3, 1, 1, 1)
+
+                tau_ij[:] = C[0] * np.sqrt(2*Ssq) * Smat[j]
+                tau_ij -= (1/3)*(i == j) * (C[2]*Ssq + C[3]*Rsq)
+                for k in range(3):
+                    tau_ij += C[1] * 0.5 * dot(Smat[ik], tkj*Rmat[kj])
+                    tau_ij -= C[1] * 0.5 * dot(tik*Rmat[ik], Smat[kj])
+                    tau_ij += C[2] * dot(Smat[ik], Smat[kj])
+                    tau_ij += C[3] * dot(tik * Rmat[ik], tkj * Rmat[kj])
+
+                self.save_histogram_to_file(grp, tau_ij, f'sigma_1{j+1}')
 
         self.istat += 1
 
@@ -1132,37 +1136,29 @@ class SpectralLES(MPI_Debugging):
         # get view of data as contiguous 1D numpy array
         data = np.ravel(data, order='K')
 
-        # get raw statistical moments
-        moments = np.empty(5)
-        moments[0] = data.size
-        moments[1] = fsum(data)
-        moments[2] = fsum(data**2)
-        moments[3] = fsum(data**3)
-        moments[4] = fsum(data**4)
-
-        if self.comm.rank == 0:
-            self.comm.Reduce(MPI.IN_PLACE, moments, op=MPI.SUM)
-        else:
-            self.comm.Reduce(moments, None, op=MPI.SUM)
-
-        moments[1:] /= moments[0]  # divide by global data element count
-
         # get data range
         gmin = self.allmin(data)
         gmax = self.allmax(data)
         xrange = (gmin, gmax)
 
-        # take log for strictly positive data
+        # construct simple logarithmic bin edges for strictly positive data
         if gmin > 0.0:
-            data = np.log10(data)
-            xrange = np.log10(xrange)
-            log = True
-            bins = 50
-        else:
-            log = False
-            bins = 100
+            edges = np.geomspace(gmin, gmax, 101)
 
-        temp, edges = np.histogram(data, bins=bins, range=xrange)
+        # otherwise construct "symlog" bin edges for data with negative
+        # values in order to vastly improve kernel density estimation
+        # in post-processing
+        else:
+            medians = self.comm.allgather(np.median(np.abs(data)))
+            abs_med = np.median(medians)
+            abs_max = max(abs(gmin), gmax)
+            lin_edges = np.linspace(-abs_med, abs_med, 51)
+            log_edges = np.geomspace(abs_med, abs_max, 26)
+            # this gives 101 edges spanning -abs_max to abs_max with half
+            # of all bins spanning -abs_med to abs_med
+            edges = np.unique(np.r_[-log_edges, lin_edges, log_edges])
+
+        temp, _ = np.histogram(data, bins=edges, density=True)
         hist = np.ascontiguousarray(temp)
 
         if self.comm.rank == 0:
@@ -1174,9 +1170,7 @@ class SpectralLES(MPI_Debugging):
             grp = fh.create_group(key)
             grp['hist'] = hist
             grp['edges'] = edges
-            grp.attrs['log'] = log
-            grp.attrs['moments'] = moments[1:]
-            grp.attrs['range'] = xrange  # note non-log range is saved
+            grp.attrs['range'] = xrange
 
         self.comm.Barrier()
 
