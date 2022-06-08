@@ -371,7 +371,6 @@ class SpectralLES(MPI_Debugging):
 
     def __del__(self):
         if self.comm.rank == 0:
-            self.fh_stat.flush()
             self.fh_stat.close()
 
         self.enable_print()
@@ -1051,12 +1050,13 @@ class SpectralLES(MPI_Debugging):
         self.save_statistics_to_file(t_sim)
         self.write_restart_to_file(checkpoint=True)
 
-        self.enable_print()
         if self.comm.rank == 0:
             self.fh_stat.flush()
             print(' *** satistics flushed to disk '
                   f'({self.istat} entries)', flush=True)
             self.fh_stat.close()
+
+        self.enable_print()
 
         return
 

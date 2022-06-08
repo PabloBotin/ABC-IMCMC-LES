@@ -82,8 +82,6 @@ SpectralLES(config).run_quiet()
 
 # Steps 2 & 3. Uniform gridded sampling
 # -----------------------------------------------------------------------------
-# Intelligent limits based on Olga's prior results and knowing that we'll only
-# sample 7 points in each coefficient.
 C_limits = [(0.5*C, 1.5*C) for C in (C1, C2, C3, C4)]
 
 C = np.empty([N_params, N_samples_per_param])
@@ -123,88 +121,100 @@ for r in range(N_runs):
     success[r] = SpectralLES(config).run_quiet()
 
 tend = time.time()
+
+###############################################################################
+# FROM HERE ON EVERYTHING SHOULD BE SERIAL
+###############################################################################
 if comm.rank == 0:
     print(f'Loop took {tend-tstart:0.2f} s')
 
-# Step 5. Postprocess distance
-# -----------------------------------------------------------------------------
-filename = f'{odir}/baseline.statistics.h5'
-fh = h5py.File(filename)
+    filename = f'{odir}/postprocessing.h5'
+    out_fh = h5py.File(filename, 'w')
+    out_fh['success'] = success
 
-# there are only outputs '000' and '001' corresponding to the random
-# initial condition and the final solution at t_sim = tlimit
-logEk_base = np.log(fh['001/Ek'][:-1])
-base_pdfs = []
-for i, S in enumerate(['Pi', 'sigma_11', 'sigma_12', 'sigma_13']):
-    hist = fh[f'001/{S}/hist'][:]
-    edges = fh[f'001/{S}/edges'][:]
-    x = 0.5 * (edges[:-1] + edges[1:])
-    density = gaussian_kde(x, weights=hist)
-    base_pdfs.append((x, np.log(density(x))))
+    # Step 5. Postprocess distance
+    # -------------------------------------------------------------------------
+    filename = f'{odir}/baseline.statistics.h5'
+    fh = h5py.File(filename)
 
-fh.close()
+    # there are only outputs '000' and '001' corresponding to the random
+    # initial condition and the final solution at t_sim = tlimit
+    logEk_base = np.log(fh['001/Ek'][:-1])
+    base_pdfs = []
+    for i, S in enumerate(['Pi', 'sigma_11', 'sigma_12', 'sigma_13']):
+        hist = fh[f'001/{S}/hist'][:]
+        edges = fh[f'001/{S}/edges'][:]
+        x = 0.5 * (edges[:-1] + edges[1:])
+        density = gaussian_kde(x, weights=hist)
+        base_pdfs.append((x, np.log(density(x))))
 
-dist = np.empty(N_runs)
-for r in range(N_runs):
-    if success[r]:
-        filename = f'{odir}/abc_run_{r}.statistics.h5'
-        fh = h5py.File(filename)
+    fh.close()
 
-        Ek = fh['001/Ek'][:-1]
+    dist = np.empty(N_runs)
+    for r in range(N_runs):
+        if success[r]:
+            filename = f'{odir}/abc_run_{r}.statistics.h5'
+            fh = h5py.File(filename)
 
-        # compute L2 norm of Ek
-        dist[r] = np.sum((np.log(Ek) - logEk_base)**2)
+            Ek = fh['001/Ek'][:-1]
 
-        for i, S in enumerate(['Pi', 'sigma_11', 'sigma_12', 'sigma_13']):
-            hist = fh[f'001/{S}/hist'][:]
-            edges = fh[f'001/{S}/edges'][:]
-            x = 0.5 * (edges[:-1] + edges[1:])
-            density = gaussian_kde(x, weights=hist)
-            x_b, y_b = base_pdfs[i]
-            y = np.log(density(x_b))  # evaluate PDF at baseline x values
+            # compute L2 norm of Ek
+            dist[r] = np.sum((np.log(Ek) - logEk_base)**2)
 
-            # add L2 norm of each PDF to L2 norm of Ek for total distance
-            dist[r] += np.sum((y - y_b)**2)
+            for i, S in enumerate(['Pi', 'sigma_11', 'sigma_12', 'sigma_13']):
+                hist = fh[f'001/{S}/hist'][:]
+                edges = fh[f'001/{S}/edges'][:]
+                x = 0.5 * (edges[:-1] + edges[1:])
+                density = gaussian_kde(x, weights=hist)
+                x_b, y_b = base_pdfs[i]
+                y = np.log(density(x_b))  # evaluate PDF at baseline x values
 
-        fh.close()
+                # add L2 norm of each PDF to L2 norm of Ek for total distance
+                dist[r] += np.sum((y - y_b)**2)
 
-    else:
-        # run not successful, set distance to infinity
-        dist[r] = np.inf
+            fh.close()
 
-# Step 6. Accept X% of all runs
-# -----------------------------------------------------------------------------
-N_accept = int(0.5 * N_runs)
-R_sort = np.argsort(dist)   # this is an array of indices that would sort dist
-epsilon = dist[R_sort[N_accept-1]]  # dist <= epsilon for all accepted runs
+        else:
+            # run not successful, set distance to infinity
+            dist[r] = np.inf
 
-# copy accepted C values from uniform grid
-C_accept = np.empty((N_params, N_accept))
-for p in range(N_params):
-    C_accept[p] = C_grids[p].flat[R_sort[:N_accept]]
+    out_fh['distance'] = dist
 
+    # Step 6. Accept X% of all runs
+    # -------------------------------------------------------------------------
+    N_accept = int(0.5 * N_runs)
+    R_sort = np.argsort(dist)   # this is an array of indices that would sort dist
+    epsilon = dist[R_sort[N_accept-1]]  # dist <= epsilon for all accepted runs
 
-# Step 7. Get Kernel Density Estimation (KDE) for accepted data
-# -----------------------------------------------------------------------------
-density = gaussian_kde(C_accept)
-x = np.vstack([C.ravel() for C in C_grids])
-jpdf = np.reshape(density(x), C_grids[0].shape)
+    # copy accepted C values from uniform grid
+    C_accept = np.empty((N_params, N_accept))
+    for p in range(N_params):
+        C_accept[p] = C_grids[p].flat[R_sort[:N_accept]]
 
-# Step 8. Get the Maximum A Posteriori (MAP) set of coefficients from the KDE
-# -----------------------------------------------------------------------------
-map0, map1, map2, map3 = np.where(jpdf == jpdf.max())
-# np.where always outputs arrays, even for single values or empty results
-map0 = map0[0]
-map1 = map1[0]
-map2 = map2[0]
-map3 = map3[0]
+    # Step 7. Get Kernel Density Estimation (KDE) for accepted data
+    # -------------------------------------------------------------------------
+    density = gaussian_kde(C_accept)
+    x = np.vstack([C.ravel() for C in C_grids])
+    jpdf = np.reshape(density(x), C_grids[0].shape)
 
-c_map = np.empty(N_params)
-c_map[0] = C[0, map0]
-c_map[1] = C[1, map1]
-c_map[2] = C[2, map2]
-c_map[3] = C[3, map3]
+    out_fh['posterior'] = jpdf
 
-if comm.rank == 0:
+    # Step 8. Get the Maximum A Posteriori (MAP) set of coefficients from the KDE
+    # -------------------------------------------------------------------------
+    map0, map1, map2, map3 = np.where(jpdf == jpdf.max())
+    # np.where always outputs arrays, even for single values or empty results
+    map0 = map0[0]
+    map1 = map1[0]
+    map2 = map2[0]
+    map3 = map3[0]
+
+    c_map = np.empty(N_params)
+    c_map[0] = C[0, map0]
+    c_map[1] = C[1, map1]
+    c_map[2] = C[2, map2]
+    c_map[3] = C[3, map3]
+
     print(f'MAP Coefficients: C1={c_map[0]:0.3f}, C2={c_map[1]:0.3f},  '
           f'C3={c_map[2]:0.3f},  C4={c_map[3]:0.3f}')
+
+    out_fh.close()
