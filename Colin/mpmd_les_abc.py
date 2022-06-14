@@ -35,14 +35,14 @@ odir = f'{os.getcwd()}/data'
 C1, C2, C3, C4 = -0.043, 0.018, 0.036, 0.036
 
 ntasks = wcomm.size
-N_tasks_per_run = (N_dealiased // 16)**2
+N_tasks_per_run = int(sys.argv[3])
 N_parallel_runs = ntasks // N_tasks_per_run
 
 # Split the default MPI communicator into several comms that will run jobs
 # in parallel, simultaneously
-sub_comm_id = wcomm.rank // N_parallel_runs
-sub_comm_rank = wcomm.rank % N_parallel_runs
-subcomm = wcomm.split(sub_comm_id, sub_comm_rank)
+sub_comm_id = wcomm.rank // N_tasks_per_run
+sub_comm_rank = wcomm.rank % N_tasks_per_run
+subcomm = wcomm.Split(sub_comm_id, sub_comm_rank)
 init_file = f'dyn_smag_{sub_comm_id}.checkpoint.h5'
 
 # Step 1. Generate reference data D
@@ -63,6 +63,8 @@ smag_cfg = Config(pid=f'dyn_smag_{sub_comm_id}',
                   )
 
 # All subcomms run their own case of Dyn Smag
+if wcomm.rank == 0:
+    print('running initial Dynamic Smag interval', flush=True)
 SpectralLES(smag_cfg, comm=subcomm).run_quiet()
 
 config = Config(pid='baseline',
@@ -81,9 +83,13 @@ config = Config(pid='baseline',
                 tlimit=round(2*tau, 3),
                 odir=odir,
                 idir=odir,
+                # limit is about 3-4x the cycles needed for baseline
+                cycle_limit=800*(N_dealiased//32),
                 )
 
 # Only the first subcomm runs the baseline 4term case
+if wcomm.rank == 0:
+    print('running baseline LES', flush=True)
 if sub_comm_id == 0:
     SpectralLES(config, comm=subcomm).run_quiet()
 
@@ -100,10 +106,6 @@ C_grids = np.meshgrid(*C, indexing='ij')
 # Step 4. Run LES for all sets of coefficients
 # -----------------------------------------------------------------------------
 N_runs = C_grids[0].size  # should be equal to N_samples**4
-N_sub_runs = N_runs // N_parallel_runs
-rstart = N_sub_runs * sub_comm_id
-rend = rstart + N_sub_runs
-
 Cs = np.empty(4)
 success = np.zeros(N_runs, dtype=bool)
 
@@ -111,9 +113,14 @@ smag_cfg.init_cond = 'file'
 smag_cfg.init_file = init_file
 smag_cfg.tlimit = round(tau, 3)
 
-wcomm.Barrier()
+rstart = sub_comm_id
+rend = N_runs
+rstride = N_parallel_runs
 
-for r in range(rstart, rend):
+for r in range(rstart, rend, rstride):
+    if sub_comm_rank == 0:
+        print(f'running test {r}', flush=True)
+
     for p in range(4):
         Cs[p] = C_grids[p].flat[r]
 
@@ -123,12 +130,7 @@ for r in range(rstart, rend):
     config.C3 = C_grids[2].flat[r]
     config.C4 = C_grids[3].flat[r]
 
-    # 1st) run Dyn Smag for another tau to get a new initial condition
     SpectralLES(smag_cfg, comm=subcomm).run_quiet()
-
-    # 2nd) run the 4-term model from this DS solution for 2 tau
-    # Note: run_quiet() and run_verbose() now return True if the simulation
-    # finished and False if it failed for any reason
     success[r] = SpectralLES(config, comm=subcomm).run_quiet()
 
 wcomm.Barrier()
@@ -139,7 +141,7 @@ if wcomm.rank == 0:
     wcomm.Reduce(MPI.IN_PLACE, success, op=MPI.LOR)
 
     # save the success array to file in numpy save format
-    np.save('success_array.npy', success)
+    np.save(f'{odir}/success_array.npy', success)
 
 else:
     wcomm.Reduce(success, None, op=MPI.LOR)

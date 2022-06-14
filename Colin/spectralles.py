@@ -283,8 +283,9 @@ class SpectralLES(MPI_Debugging):
             self.update_turbulence_model = self.update_4term_viscosity
             self.rhs_turbulence_model = self.rhs_4term
 
-        else:  # 'DNS', do nothing here.
-            pass
+        else:  # 'DNS'
+            self.work = np.empty([1, *self.r.shape], self.r.dtype)
+            self.nuT = config.nu
 
         # --------------------------------------------------------------
         # Configure the spectral forcing
@@ -353,19 +354,18 @@ class SpectralLES(MPI_Debugging):
         # --------------------------------------------------------------
         self.fh_stat = None
         self.stat_file = f"{config.odir}/{config.pid}.statistics.h5"
-        MiB = 1048576  # 1 mibibyte (Lustre stripe size)
 
         if comm.rank == 0:
             os.makedirs(f'{config.odir}', exist_ok=True)
-            self.fh_stat = h5py.File(self.stat_file, 'w', driver='core',
-                                     block_size=MiB)
+            self.fh_stat = h5py.File(self.stat_file, 'w')
 
         self.save_statistics_to_file(config.t_init)
 
         self.t_rst += config.dt_rst
         self.t_stat += config.dt_stat
 
-        self.disable_print()  # disable screen outputs by default
+        # disable screen outputs to file by default
+        self.redirect_print(f"{config.odir}/{config.pid}.log")
 
         return
 
@@ -851,16 +851,10 @@ class SpectralLES(MPI_Debugging):
             self.t_stat += max(config.dt_stat, t_next - self.t_stat)
             self.save_statistics_to_file(t_sim)
 
-        rst_output = False
         if t_sim + 1e-14 >= self.t_rst:
             config.dt_init = new_dt  # this modifies the Config object in place
             self.t_rst += max(config.dt_rst, t_next - self.t_rst)
             self.write_restart_to_file()
-            rst_output = True
-
-        if rst_output or (self.istep % 200 == 0):
-            if self.comm.rank == 0:
-                self.fh_stat.flush()
 
         if self.istep > config.cycle_limit:
             self.finalize(t_sim)
@@ -1051,9 +1045,6 @@ class SpectralLES(MPI_Debugging):
         self.write_restart_to_file(checkpoint=True)
 
         if self.comm.rank == 0:
-            self.fh_stat.flush()
-            print(' *** satistics flushed to disk '
-                  f'({self.istat} entries)', flush=True)
             self.fh_stat.close()
 
         self.enable_print()
@@ -1075,12 +1066,13 @@ class SpectralLES(MPI_Debugging):
         if self.comm.rank == 0:
             grp['Ek'] = Ek1d
 
-        work[:] = self.strain_squared(u_hat, out=work) + 1e-99
-        work *= self.nuT  # convert Ssq to Pi
-        if self.config.model == '4term':
-            # because Ssq = 2SijSij here, but not in 4term model!
-            work *= 0.5
-        self.save_histogram_to_file(grp, work, 'Pi')
+        if self.config.model in ['smag', 'dyn_smag', '4term']:
+            work[:] = self.strain_squared(u_hat, out=work) + 1e-99
+            work *= self.nuT  # convert Ssq to Pi
+            if self.config.model == '4term':
+                # because Ssq = 2SijSij here, but not in 4term model!
+                work *= 0.5
+            self.save_histogram_to_file(grp, work, 'Pi')
 
         # turbulent stress tensor statistics
         if self.config.model in ['smag', 'dyn_smag']:
@@ -1090,7 +1082,7 @@ class SpectralLES(MPI_Debugging):
                 self.w[0] = self.nuT * Sij
                 self.save_histogram_to_file(grp, self.w[0], f'sigma_1{j+1}')
 
-        else:  # 4term model
+        elif self.config.model == '4term':
             # When this function is called from `step_update` or `finalize`,
             # the following things are true:
             # - Smat and Rmat will already be computed and correct
@@ -1128,7 +1120,44 @@ class SpectralLES(MPI_Debugging):
 
                 self.save_histogram_to_file(grp, tau_ij, f'sigma_1{j+1}')
 
+        else:  # DNS!
+            work[:] = 0.5 * dot(self.u, self.u)
+            self.save_moments_to_file(grp, work, 'tke')
+
+            work[:] = self.nu * self.strain_squared(u_hat, out=work)
+            self.save_moments_to_file(grp, work, 'eps')
+
+            self.curl(u_hat, out=self.w)
+            work[:] = dot(self.w, self.w)
+            self.save_moments_to_file(grp, work, 'enst')[0]
+
         self.istat += 1
+
+        return
+
+    def save_moments_to_file(self, grp, data, key):
+        # get view of data as contiguous 1D numpy array
+        data = np.ravel(data, order='K')
+
+        # get raw statistical moments
+        moments = np.empty(5)
+        moments[0] = data.size
+        moments[1] = fsum(data)
+        moments[2] = fsum(data**2)
+        moments[3] = fsum(data**3)
+        moments[4] = fsum(data**4)
+
+        if self.comm.rank == 0:
+            self.comm.Reduce(MPI.IN_PLACE, moments, op=MPI.SUM)
+        else:
+            self.comm.Reduce(moments, None, op=MPI.SUM)
+
+        moments[1:] /= moments[0]  # divide by global data element count
+
+        if self.comm.rank == 0:
+            grp.attrs[key] = moments[1:]
+
+        self.comm.Barrier()
 
         return
 
