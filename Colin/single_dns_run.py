@@ -17,7 +17,7 @@ tau = (ell**2/eps)**(1/3)   # coarse approximation
 # redirect all spectralLES file outputs somewhere else
 odir = f'{os.getcwd()}/data'
 
-N_dealiased = K // 2  # if K=512, yields 768^3 physical-space mesh and kmax*eta=1
+N_dealiased = K  # if K=512, yields 768^3 physical-space mesh and kmax*eta=1
 
 config = Config(pid='K{K}_DNS',
                 model='dns',
