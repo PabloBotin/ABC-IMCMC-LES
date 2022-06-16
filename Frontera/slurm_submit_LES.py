@@ -86,12 +86,13 @@ with open(slurm_script, 'wt') as fh:
     fh.write(textwrap.dedent(script))
 
 print(f"submitting {slurm_script}...")
-output = subprocess.run(['sbatch', slurm_script],
+output = subprocess.run(['sbatch','--parsable', slurm_script],
                         capture_output=True, text=True).stdout
 print(output)
 
 jobid = output.split()[-1]
 jobdir = f"{notebook}/{today}/{jobid}.{jobname}"
+print(f'making job directory {jobdir}')
 os.makedirs(jobdir, exist_ok=True)
 
 shutil.copy(slurm_script, jobdir)
