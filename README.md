@@ -8,7 +8,7 @@ Large Eddy Simulation (LES) is a widely used computational technique in fluid dy
 
 ### Data Source
 
-The true data for this project is sourced from the **[Johns Hopkins Direct Numerical Simulation (DNS) Turbulence Database](https://turbulence.pha.jhu.edu/)** . This dataset provides high-fidelity turbulence data, which is used to validate and benchmark the calibrated LES model.
+The true data for this project is sourced from the **[Johns Hopkins Direct Numerical Simulation (DNS) Turbulence Database](https://turbulence.pha.jhu.edu/)**, which provides high-fidelity turbulence data used to validate and benchmark the calibrated LES model. Additionally, I conducted my own DNS simulations to produce supplementary validation data, ensuring a robust calibration process across multiple data sources.
 
 ## Repository Structure
 
